@@ -12,7 +12,7 @@ import (
 )
 
 // StartHeartbeat starts a periodic check that reads HEARTBEAT.md and pushes
-// its content into the agent's inbound bus for processing.
+// its content into the agent's inbound chat hub for processing.
 func StartHeartbeat(ctx context.Context, workspace string, interval time.Duration, hub *chat.Hub) {
 	go func() {
 		ticker := time.NewTicker(interval)

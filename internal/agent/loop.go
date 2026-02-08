@@ -20,7 +20,7 @@ var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
 
 // AgentLoop is the core processing loop; it holds an LLM provider, tools, sessions and context builder.
 type AgentLoop struct {
-	bus           *chat.Hub
+	hub           *chat.Hub
 	provider      providers.LLMProvider
 	tools         *tools.Registry
 	sessions      *session.SessionManager
@@ -75,7 +75,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	reg.Register(tools.NewReadSkillTool(skillMgr))
 	reg.Register(tools.NewDeleteSkillTool(skillMgr))
 
-	return &AgentLoop{bus: b, provider: provider, tools: reg, sessions: sm, context: ctx, memory: mem, model: model, maxIterations: maxIterations}
+	return &AgentLoop{hub: b, provider: provider, tools: reg, sessions: sm, context: ctx, memory: mem, model: model, maxIterations: maxIterations}
 }
 
 // Run starts processing inbound messages. This is a blocking call until context is canceled.
@@ -89,7 +89,7 @@ func (a *AgentLoop) Run(ctx context.Context) {
 			log.Println("Agent loop received shutdown signal")
 			a.running = false
 			return
-		case msg, ok := <-a.bus.In:
+		case msg, ok := <-a.hub.In:
 			if !ok {
 				log.Println("Inbound channel closed, stopping agent loop")
 				a.running = false
@@ -109,7 +109,7 @@ func (a *AgentLoop) Run(ctx context.Context) {
 				}
 				out := chat.Outbound{Channel: msg.Channel, ChatID: msg.ChatID, Content: "OK, I've remembered that."}
 				select {
-				case a.bus.Out <- out:
+				case a.hub.Out <- out:
 				default:
 					log.Println("Outbound channel full, dropping message")
 				}
@@ -186,7 +186,7 @@ func (a *AgentLoop) Run(ctx context.Context) {
 
 			out := chat.Outbound{Channel: msg.Channel, ChatID: msg.ChatID, Content: finalContent}
 			select {
-			case a.bus.Out <- out:
+			case a.hub.Out <- out:
 			default:
 				log.Println("Outbound channel full, dropping message")
 			}

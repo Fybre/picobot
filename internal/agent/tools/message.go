@@ -11,13 +11,13 @@ import (
 // MessageTool sends messages to a channel via the chat Hub.
 // It holds a context (channel + chatID) which should be set per-incoming-message.
 type MessageTool struct {
-	bus     *chat.Hub
+	hub     *chat.Hub
 	channel string
 	chatID  string
 }
 
 func NewMessageTool(b *chat.Hub) *MessageTool {
-	return &MessageTool{bus: b}
+	return &MessageTool{hub: b}
 }
 
 func (m *MessageTool) Name() string        { return "message" }
@@ -57,14 +57,14 @@ func (m *MessageTool) Execute(ctx context.Context, args map[string]interface{}) 
 	if content == "" {
 		return "", fmt.Errorf("message tool: 'content' argument required")
 	}
-	// Publish outbound message to bus
+	// Publish outbound message to hub
 	out := chat.Outbound{
 		Channel: m.channel,
 		ChatID:  m.chatID,
 		Content: content,
 	}
 	select {
-	case m.bus.Out <- out:
+	case m.hub.Out <- out:
 		return "sent", nil
 	default:
 		return "", fmt.Errorf("outbound channel full")
