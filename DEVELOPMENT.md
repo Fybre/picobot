@@ -137,12 +137,6 @@ docker logs -f picobot
 
 ### Push to Docker Hub
 
-**First time only** — log in:
-
-```sh
-docker login
-```
-
 **Build and push** in one shot:
 
 ```sh
@@ -151,68 +145,7 @@ docker build -f docker/Dockerfile -t louisho5/picobot:latest . && \
 docker push louisho5/picobot:latest
 ```
 
-Verify it's live at [hub.docker.com/r/louisho5/picobot](https://hub.docker.com/r/louisho5/picobot).
-
-### Version tagging
-
-If you want to publish a specific version tag (like `v0.1.0`) alongside `latest`:
-
-```sh
-docker tag louisho5/picobot:latest louisho5/picobot:v0.1.0
-docker push louisho5/picobot:v0.1.0
-```
-
-Users can then pin to that version:
-
-```sh
-docker pull louisho5/picobot:v0.1.0
-```
-
-### Full release checklist
-
-When you're ready to ship a new version:
-
-```sh
-# 1. Update version in cmd/picobot/main.go
-# 2. Run tests
-go test ./...
-
-# 3. Build Go binary
-go build ./...
-
-# 4. Build Docker image
-docker build -f docker/Dockerfile -t louisho5/picobot:latest .
-
-# 5. Push to Docker Hub
-docker push louisho5/picobot:latest
-
-# 6. (Optional) Tag and push a versioned release
-docker tag louisho5/picobot:latest louisho5/picobot:v0.1.0
-docker push louisho5/picobot:v0.1.0
-```
-
-## Docker Compose for Local Dev
-
-If you want to test the full Docker setup locally (closer to how it'll run in production):
-
-```sh
-cd docker
-cp .env.example .env
-# Edit .env with your real API keys
-docker compose up -d
-```
-
-View logs:
-
-```sh
-docker compose logs -f
-```
-
-Stop:
-
-```sh
-docker compose down
-```
+Docker hub: [hub.docker.com/r/louisho5/picobot](https://hub.docker.com/r/louisho5/picobot).
 
 ## Environment Variables
 
@@ -306,32 +239,4 @@ Try cleaning and re-downloading deps:
 go clean -cache
 go mod tidy
 go build ./...
-```
-
-### Docker build fails on `go mod download`
-
-Make sure `go.mod` and `go.sum` are committed and synced:
-
-```sh
-go mod tidy
-git add go.mod go.sum
-git commit -m "Update go modules"
-```
-
-### Tests pass locally but fail in CI
-
-Check your Go version — CI might be using a different version. Match it:
-
-```sh
-go version
-# vs what's in .github/workflows or your CI config
-```
-
-### Can't push to Docker Hub
-
-Make sure you're logged in and have permission:
-
-```sh
-docker login
-# Use your Docker Hub username, not email
 ```
