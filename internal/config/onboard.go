@@ -20,8 +20,6 @@ func DefaultConfig() Config {
 			Temperature:        0.7,
 			MaxToolIterations:  100,
 			HeartbeatIntervalS: 60,
-			StripThinkTags:     false,               // Set to true to strip <think>...</think> from reasoning models
-			ThinkTagRegex:      "(?s)<think[^>]*>.*?</think>", // Regex pattern for stripping think tags
 		}},
 		Channels: ChannelsConfig{Telegram: TelegramConfig{Enabled: false, Token: "", AllowFrom: []string{}}},
 		Providers: ProvidersConfig{

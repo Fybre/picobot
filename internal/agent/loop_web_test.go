@@ -53,7 +53,7 @@ func TestAgentExecutesWebToolCall(t *testing.T) {
 
 	b := chat.NewHub(10)
 	p := &webCallingProvider{server: h.URL}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, config.MCPConfig{}, false, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, config.MCPConfig{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

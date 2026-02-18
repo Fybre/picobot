@@ -13,7 +13,7 @@ func TestProcessDirectWithStub(t *testing.T) {
 	b := chat.NewHub(10)
 	p := providers.NewStubProvider()
 
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, config.MCPConfig{}, false, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, config.MCPConfig{})
 
 	resp, err := ag.ProcessDirect("hello", 1*time.Second)
 	if err != nil {

@@ -32,7 +32,7 @@ func (f *FakeProvider) GetDefaultModel() string { return "fake" }
 func TestAgentExecutesToolCall(t *testing.T) {
 	b := chat.NewHub(10)
 	p := &FakeProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 3, "", nil, config.MCPConfig{}, false, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 3, "", nil, config.MCPConfig{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

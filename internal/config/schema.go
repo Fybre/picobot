@@ -33,8 +33,6 @@ type AgentDefaults struct {
 	Temperature        float64 `json:"temperature"`
 	MaxToolIterations  int     `json:"maxToolIterations"`
 	HeartbeatIntervalS int     `json:"heartbeatIntervalS"`
-	StripThinkTags     bool    `json:"stripThinkTags"`               // Strip <think>...</think> from responses
-	ThinkTagRegex      string  `json:"thinkTagRegex,omitempty"`      // Regex pattern for stripping think tags (default: (?s)<think[^>]*>.*?</think>)
 }
 
 type ChannelsConfig struct {

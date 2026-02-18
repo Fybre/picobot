@@ -42,7 +42,7 @@ func (p *writeMemoryCallingProvider) GetDefaultModel() string { return "test" }
 func TestProcessDirectExecutesToolCall(t *testing.T) {
 	b := chat.NewHub(10)
 	prov := &writeMemoryCallingProvider{}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, "", nil, config.MCPConfig{}, false, "")
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, "", nil, config.MCPConfig{})
 
 	resp, err := ag.ProcessDirect("please remember Test note", 2*time.Second)
 	if err != nil {
