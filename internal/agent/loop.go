@@ -253,6 +253,19 @@ func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Set tool context so message/cron tools know the originating channel,
+	// matching what Run() does for hub-based messages.
+	if mt := a.tools.Get("message"); mt != nil {
+		if mtool, ok := mt.(interface{ SetContext(string, string) }); ok {
+			mtool.SetContext("cli", "direct")
+		}
+	}
+	if ct := a.tools.Get("cron"); ct != nil {
+		if ctool, ok := ct.(interface{ SetContext(string, string) }); ok {
+			ctool.SetContext("cli", "direct")
+		}
+	}
+
 	// Build full context (bootstrap files, skills, memory) just like the main loop
 	memCtx, _ := a.memory.GetMemoryContext()
 	memories := a.memory.Recent(5)
