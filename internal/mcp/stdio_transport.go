@@ -246,18 +246,23 @@ func (t *StdioTransport) Close() error {
 	}
 
 	if t.cmd != nil && t.cmd.Process != nil {
-		done := make(chan error, 1)
+		// Create a channel to signal when Wait() completes
+		done := make(chan struct{})
 		go func() {
-			done <- t.cmd.Wait()
+			_ = t.cmd.Wait()
+			close(done)
 		}()
 
 		select {
 		case <-done:
+			// Process exited gracefully
 		case <-time.After(defaultShutdownTimeout):
+			// Timeout - force kill
 			if err := t.cmd.Process.Kill(); err != nil {
 				log.Printf("[MCP] Failed to kill process: %v", err)
 			}
-			_ = t.cmd.Wait()
+			// Wait for the goroutine to complete after kill
+			<-done
 		}
 	}
 
