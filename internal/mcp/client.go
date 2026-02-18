@@ -1,101 +1,23 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/local/picobot/internal/config"
 )
 
-const (
-	defaultTimeout         = 30 * time.Second
-	defaultShutdownTimeout = 5 * time.Second
-)
+const defaultTimeout = 30 * time.Second
 
-// Client is a stdio-based JSON-RPC client for MCP servers.
-type Client struct {
-	cmd       *exec.Cmd
-	stdin     *bufio.Writer
-	stdinPipe *os.File // Store for closing
-	stdout    *bufio.Reader
-	stderr    *bufio.Reader
-	mu        sync.Mutex
-	closed    atomic.Bool
-}
+var requestIDCounter int64
 
-// NewClient starts an MCP server process and returns a Client.
-func NewClient(cfg config.MCPServerConfig) (*Client, error) {
-	cmd := exec.Command(cfg.Command, cfg.Args...)
-
-	// Set environment variables
-	if len(cfg.Env) > 0 {
-		env := os.Environ()
-		for k, v := range cfg.Env {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-		cmd.Env = env
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start MCP server: %w", err)
-	}
-
-	// Get the file from the pipe for closing later
-	stdinFile, ok := stdin.(*os.File)
-	if !ok {
-		// Should not happen with StdinPipe, but handle gracefully
-		stdinFile = nil
-	}
-
-	client := &Client{
-		cmd:       cmd,
-		stdin:     bufio.NewWriter(stdin),
-		stdinPipe: stdinFile,
-		stdout:    bufio.NewReader(stdout),
-		stderr:    bufio.NewReader(stderr),
-	}
-
-	// Start stderr logger
-	go client.logStderr()
-
-	return client, nil
-}
-
-// logStderr logs stderr output from the MCP server.
-func (c *Client) logStderr() {
-	scanner := bufio.NewScanner(c.stderr)
-	for scanner.Scan() {
-		if line := strings.TrimSpace(scanner.Text()); line != "" {
-			log.Printf("[MCP Server] %s", line)
-		}
-	}
-	if err := scanner.Err(); err != nil && !c.closed.Load() {
-		log.Printf("[MCP] Stderr scanner error: %v", err)
-	}
+func nextRequestID() int {
+	return int(atomic.AddInt64(&requestIDCounter, 1))
 }
 
 // request represents a JSON-RPC request.
@@ -116,8 +38,8 @@ type response struct {
 
 // rpcError represents a JSON-RPC error.
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
@@ -125,118 +47,33 @@ func (e *rpcError) Error() string {
 	return fmt.Sprintf("RPC error %d: %s", e.Code, e.Message)
 }
 
-var requestIDCounter int64
-
-func nextRequestID() int {
-	return int(atomic.AddInt64(&requestIDCounter, 1))
+// Client is an MCP client that uses a Transport.
+type Client struct {
+	transport Transport
 }
 
-// call sends a JSON-RPC request and returns the result.
-// Uses per-call state to avoid goroutine leaks on timeout.
-func (c *Client) call(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	if c.closed.Load() {
-		return nil, fmt.Errorf("client is closed")
-	}
-
-	// Marshal params
-	var paramsRaw json.RawMessage
+// NewClient creates a new MCP client with the appropriate transport.
+// Uses HTTP transport if URL is provided, otherwise stdio transport.
+func NewClient(cfg config.MCPServerConfig) (*Client, error) {
+	var transport Transport
 	var err error
-	if params != nil {
-		paramsRaw, err = json.Marshal(params)
+
+	if cfg.URL != "" {
+		// Use HTTP transport
+		transport = NewHTTPTransport(cfg.URL)
+		log.Printf("[MCP] Using HTTP transport for %s", cfg.URL)
+	} else if cfg.Command != "" {
+		// Use stdio transport
+		transport, err = NewStdioTransport(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal params: %w", err)
+			return nil, err
 		}
+		log.Printf("[MCP] Using stdio transport for command: %s", cfg.Command)
+	} else {
+		return nil, fmt.Errorf("MCP server config must have either URL (for HTTP) or Command (for stdio)")
 	}
 
-	req := request{
-		JSONRPC: "2.0",
-		ID:      nextRequestID(),
-		Method:  method,
-		Params:  paramsRaw,
-	}
-
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	// Create per-call state
-	type callResult struct {
-		resp *response
-		err  error
-	}
-	callDone := make(chan callResult, 1)
-
-	// Start response reader goroutine that will clean itself up
-	go func(reqID int, done chan<- callResult) {
-		resp, err := c.readResponse(reqID)
-		select {
-		case done <- callResult{resp: resp, err: err}:
-		default:
-			// Channel has buffer of 1, so this means nobody is waiting
-			// (timeout occurred), just discard
-		}
-	}(req.ID, callDone)
-
-	// Send request (protected by mutex for concurrent safety)
-	c.mu.Lock()
-	_, err = c.stdin.Write(append(data, '\n'))
-	if err != nil {
-		c.mu.Unlock()
-		return nil, fmt.Errorf("failed to write request: %w", err)
-	}
-	err = c.stdin.Flush()
-	c.mu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("failed to flush request: %w", err)
-	}
-
-	// Wait for response or timeout
-	select {
-	case result := <-callDone:
-		if result.err != nil {
-			return nil, result.err
-		}
-		if result.resp.Error != nil {
-			return nil, result.resp.Error
-		}
-		return result.resp.Result, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("MCP request timeout: %w", ctx.Err())
-	}
-}
-
-// readResponse reads and parses a JSON-RPC response with the given ID.
-func (c *Client) readResponse(expectedID int) (*response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for {
-		line, err := c.stdout.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var resp response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			// Log and skip malformed lines
-			log.Printf("[MCP] Failed to parse response: %v", err)
-			continue
-		}
-
-		// Only handle responses (not notifications)
-		if resp.ID == expectedID {
-			return &resp, nil
-		}
-
-		// Unexpected ID, log and continue
-		log.Printf("[MCP] Unexpected response ID: got %d, want %d", resp.ID, expectedID)
-	}
+	return &Client{transport: transport}, nil
 }
 
 // InitializeResult contains the result of the initialize handshake.
@@ -263,7 +100,7 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 		"capabilities": map[string]interface{}{},
 	}
 
-	result, err := c.call(ctx, "initialize", params)
+	result, err := c.transport.Call(ctx, "initialize", params)
 	if err != nil {
 		return nil, err
 	}
@@ -274,47 +111,11 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	}
 
 	// Send initialized notification
-	if err := c.sendNotification(ctx, "notifications/initialized", nil); err != nil {
+	if err := c.transport.SendNotification(ctx, "notifications/initialized", nil); err != nil {
 		log.Printf("[MCP] Failed to send initialized notification: %v", err)
 	}
 
 	return &initResult, nil
-}
-
-// sendNotification sends a JSON-RPC notification (no response expected).
-func (c *Client) sendNotification(ctx context.Context, method string, params interface{}) error {
-	if c.closed.Load() {
-		return fmt.Errorf("client is closed")
-	}
-
-	var paramsRaw json.RawMessage
-	if params != nil {
-		var err error
-		paramsRaw, err = json.Marshal(params)
-		if err != nil {
-			return fmt.Errorf("failed to marshal params: %w", err)
-		}
-	}
-
-	req := request{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  paramsRaw,
-	}
-
-	data, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("failed to marshal notification: %w", err)
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	_, err = c.stdin.Write(append(data, '\n'))
-	if err != nil {
-		return fmt.Errorf("failed to write notification: %w", err)
-	}
-	return c.stdin.Flush()
 }
 
 // ToolDefinition represents an MCP tool definition.
@@ -331,7 +132,7 @@ type ListToolsResult struct {
 
 // ListTools retrieves all available tools from the MCP server.
 func (c *Client) ListTools(ctx context.Context) ([]ToolDefinition, error) {
-	result, err := c.call(ctx, "tools/list", nil)
+	result, err := c.transport.Call(ctx, "tools/list", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +175,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 		"arguments": args,
 	}
 
-	result, err := c.call(ctx, "tools/call", params)
+	result, err := c.transport.Call(ctx, "tools/call", params)
 	if err != nil {
 		return nil, err
 	}
@@ -387,37 +188,10 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 	return &callResult, nil
 }
 
-// Close gracefully shuts down the MCP server process.
+// Close closes the client connection.
 func (c *Client) Close() error {
-	if !c.closed.CompareAndSwap(false, true) {
-		// Already closed
-		return nil
+	if c.transport != nil {
+		return c.transport.Close()
 	}
-
-	// Close stdin to signal EOF to the subprocess (triggers graceful exit)
-	if c.stdinPipe != nil {
-		_ = c.stdinPipe.Close()
-	}
-
-	// Try graceful shutdown
-	if c.cmd != nil && c.cmd.Process != nil {
-		// Wait for process to exit gracefully
-		done := make(chan error, 1)
-		go func() {
-			done <- c.cmd.Wait()
-		}()
-
-		select {
-		case <-done:
-			// Process exited gracefully
-		case <-time.After(defaultShutdownTimeout):
-			// Timeout, force kill
-			if err := c.cmd.Process.Kill(); err != nil {
-				log.Printf("[MCP] Failed to kill process: %v", err)
-			}
-			_ = c.cmd.Wait() // Reap the process
-		}
-	}
-
 	return nil
 }

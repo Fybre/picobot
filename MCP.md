@@ -60,15 +60,23 @@ Add MCP servers to `~/.picobot/config.json`:
 
 ### Configuration Fields
 
-Picobot uses the **standard MCP configuration format**:
+Picobot supports both **stdio** and **streamable HTTP** transports:
+
+**For stdio transport (local subprocess):**
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `command` | **Yes** | - | Executable to run (e.g., `npx`, `python3`, `docker`) |
+| `command` | **Yes*** | - | Executable to run (e.g., `npx`, `python3`, `docker`) |
 | `args` | No | `[]` | Arguments passed to command |
 | `env` | No | `{}` | Environment variables for the server |
 
-> **Note:** All servers defined in the config are automatically started. To disable a server, remove it from the config or comment it out.
+**For HTTP transport (remote server):**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `url` | **Yes*** | - | HTTP endpoint URL (e.g., `https://api.example.com/mcp`) |
+
+> **Note:** Use either `command` (for stdio) OR `url` (for HTTP), not both. All servers defined in the config are automatically started. To disable a server, remove it from the config or comment it out.
 
 ### Tool Namespacing
 
@@ -107,9 +115,53 @@ Browse the [MCP Registry](https://registry.modelcontextprotocol.io/) for hundred
 - Brave Search, DuckDuckGo
 - And many more!
 
+## Transports
+
+### Stdio Transport (Default)
+
+The stdio transport spawns MCP servers as local subprocesses. This is the most common transport and works with most MCP servers:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"
+        }
+      }
+    }
+  }
+}
+```
+
+### Streamable HTTP Transport
+
+The HTTP transport connects to remote MCP servers over HTTP with Server-Sent Events (SSE) for streaming. This allows connecting to cloud-hosted MCP servers:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "remote": {
+        "url": "https://api.example.com/mcp"
+      }
+    }
+  }
+}
+```
+
+**Features:**
+- Supports both direct JSON responses and SSE streaming
+- Automatic session management via `Mcp-Session-Id` header
+- Protocol version negotiation
+- Can receive server-initiated notifications via SSE
+
 ## Configuration Examples
 
-### GitHub Integration
+### GitHub Integration (stdio)
 
 ```json
 {
@@ -164,6 +216,40 @@ Browse the [MCP Registry](https://registry.modelcontextprotocol.io/) for hundred
       "postgres": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+      }
+    }
+  }
+}
+```
+
+### Remote HTTP Server
+
+Connect to an MCP server hosted remotely:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "cloud-api": {
+        "url": "https://mcp.example.com/v1"
+      }
+    }
+  }
+}
+```
+
+You can mix stdio and HTTP servers in the same config:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "local-tools": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+      },
+      "cloud-service": {
+        "url": "https://api.example.com/mcp"
       }
     }
   }
