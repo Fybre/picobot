@@ -20,15 +20,24 @@ const (
 	defaultShutdownTimeout = 5 * time.Second
 )
 
+// pendingCall represents a waiting RPC call.
+type pendingCall struct {
+	id      int
+	done    chan *response
+	errChan chan error
+}
+
 // StdioTransport implements Transport using stdio (subprocess).
 type StdioTransport struct {
-	cmd       *exec.Cmd
-	stdin     *bufio.Writer
-	stdinPipe *os.File
-	stdout    *bufio.Reader
-	stderr    *bufio.Reader
-	mu        sync.Mutex
-	closed    atomic.Bool
+	cmd        *exec.Cmd
+	stdin      *bufio.Writer
+	stdinPipe  *os.File
+	stdout     *bufio.Reader
+	stderr     *bufio.Reader
+	mu         sync.Mutex
+	closed     atomic.Bool
+	pending    map[int]*pendingCall // guarded by mu
+	readerDone chan struct{}        // closed when response reader exits
 }
 
 // NewStdioTransport creates a new stdio-based transport.
@@ -70,15 +79,18 @@ func NewStdioTransport(cfg config.MCPServerConfig) (*StdioTransport, error) {
 	}
 
 	transport := &StdioTransport{
-		cmd:       cmd,
-		stdin:     bufio.NewWriter(stdin),
-		stdinPipe: stdinFile,
-		stdout:    bufio.NewReader(stdout),
-		stderr:    bufio.NewReader(stderr),
+		cmd:        cmd,
+		stdin:      bufio.NewWriter(stdin),
+		stdinPipe:  stdinFile,
+		stdout:     bufio.NewReader(stdout),
+		stderr:     bufio.NewReader(stderr),
+		pending:    make(map[int]*pendingCall),
+		readerDone: make(chan struct{}),
 	}
 
-	// Start stderr logger
+	// Start background goroutines
 	go transport.logStderr()
+	go transport.readResponses()
 
 	return transport, nil
 }
@@ -93,6 +105,52 @@ func (t *StdioTransport) logStderr() {
 	}
 	if err := scanner.Err(); err != nil && !t.closed.Load() {
 		log.Printf("[MCP] Stderr scanner error: %v", err)
+	}
+}
+
+// readResponses is the SINGLE goroutine that reads from stdout.
+// It demuxes responses to the appropriate pending calls.
+func (t *StdioTransport) readResponses() {
+	defer close(t.readerDone)
+
+	for {
+		if t.closed.Load() {
+			return
+		}
+
+		line, err := t.stdout.ReadString('\n')
+		if err != nil {
+			if !t.closed.Load() {
+				log.Printf("[MCP] Response reader error: %v", err)
+			}
+			return
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var resp response
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			log.Printf("[MCP] Failed to parse response: %v", err)
+			continue
+		}
+
+		// Dispatch to pending call
+		t.mu.Lock()
+		call, ok := t.pending[resp.ID]
+		t.mu.Unlock()
+
+		if ok {
+			select {
+			case call.done <- &resp:
+			default:
+				// Receiver already timed out
+			}
+		} else {
+			log.Printf("[MCP] Unexpected response ID: %d (no pending call)", resp.ID)
+		}
 	}
 }
 
@@ -124,78 +182,60 @@ func (t *StdioTransport) Call(ctx context.Context, method string, params interfa
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Create per-call state
-	type callResult struct {
-		resp *response
-		err  error
+	// Register pending call BEFORE sending request
+	call := &pendingCall{
+		id:      req.ID,
+		done:    make(chan *response, 1),
+		errChan: make(chan error, 1),
 	}
-	callDone := make(chan callResult, 1)
 
-	// Start response reader goroutine
-	go func(reqID int, done chan<- callResult) {
-		resp, err := t.readResponse(reqID)
-		select {
-		case done <- callResult{resp: resp, err: err}:
-		default:
-			// Timeout occurred, discard
-		}
-	}(req.ID, callDone)
+	t.mu.Lock()
+	if t.closed.Load() {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("transport is closed")
+	}
+	t.pending[req.ID] = call
+	t.mu.Unlock()
 
-	// Send request
+	// Send request (protected by mutex for concurrent safety on stdin)
 	t.mu.Lock()
 	_, err = t.stdin.Write(append(data, '\n'))
 	if err != nil {
+		t.mu.Unlock()
+		// Clean up pending call
+		t.mu.Lock()
+		delete(t.pending, req.ID)
 		t.mu.Unlock()
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
 	err = t.stdin.Flush()
 	t.mu.Unlock()
 	if err != nil {
+		// Clean up pending call
+		t.mu.Lock()
+		delete(t.pending, req.ID)
+		t.mu.Unlock()
 		return nil, fmt.Errorf("failed to flush request: %w", err)
 	}
 
 	// Wait for response or timeout
 	select {
-	case result := <-callDone:
-		if result.err != nil {
-			return nil, result.err
+	case resp := <-call.done:
+		// Clean up pending call
+		t.mu.Lock()
+		delete(t.pending, req.ID)
+		t.mu.Unlock()
+
+		if resp.Error != nil {
+			return nil, resp.Error
 		}
-		if result.resp.Error != nil {
-			return nil, result.resp.Error
-		}
-		return result.resp.Result, nil
+		return resp.Result, nil
 	case <-ctx.Done():
+		// Clean up pending call
+		t.mu.Lock()
+		delete(t.pending, req.ID)
+		t.mu.Unlock()
 		return nil, fmt.Errorf("MCP request timeout: %w", ctx.Err())
-	}
-}
-
-// readResponse reads and parses a JSON-RPC response with the given ID.
-func (t *StdioTransport) readResponse(expectedID int) (*response, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	for {
-		line, err := t.stdout.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var resp response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			log.Printf("[MCP] Failed to parse response: %v", err)
-			continue
-		}
-
-		if resp.ID == expectedID {
-			return &resp, nil
-		}
-
-		log.Printf("[MCP] Unexpected response ID: got %d, want %d", resp.ID, expectedID)
 	}
 }
 
@@ -227,6 +267,10 @@ func (t *StdioTransport) SendNotification(ctx context.Context, method string, pa
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	if t.closed.Load() {
+		return fmt.Errorf("transport is closed")
+	}
 
 	_, err = t.stdin.Write(append(data, '\n'))
 	if err != nil {
@@ -265,6 +309,9 @@ func (t *StdioTransport) Close() error {
 			<-done
 		}
 	}
+
+	// Wait for response reader to exit
+	<-t.readerDone
 
 	return nil
 }
